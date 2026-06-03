@@ -280,15 +280,16 @@ STAR_BONUS = {
 # ══════════════════════════════════════════════════════════
 # 布局 & 颜色
 # ══════════════════════════════════════════════════════════
-TILE      = 80
-COLS      = 10
-ROWS      = 8
-MARGIN_X  = 60
-MARGIN_Y  = 152
-WIN_W     = COLS * TILE + MARGIN_X * 2
-WIN_H     = ROWS * TILE + MARGIN_Y + 50
-FPS       = 60
-IMG_COUNT = 20
+TILE       = 80
+COLS       = 10
+ROWS       = 8
+MARGIN_X   = 60
+MARGIN_Y   = 152
+WIN_W      = COLS * TILE + MARGIN_X * 2
+WIN_H      = ROWS * TILE + MARGIN_Y + 50
+FPS        = 60
+TOTAL_IMGS = 80   # 图片库总数
+IMG_COUNT  = 20   # 每局随机选取数量
 
 WHITE   = (255, 255, 255)
 BG      = (220, 238, 255)
@@ -447,16 +448,17 @@ def draw_shadow_text(surf, font, text, color, center):
 # 主游戏类
 # ══════════════════════════════════════════════════════════
 class LinkGame:
-    ST_PLAYING = "playing"
-    ST_PAUSED  = "paused"
-    ST_RESULT  = "result"
-    ST_CONFIRM = "confirm"   # 提交成绩二次确认
+    ST_PLAYING       = "playing"
+    ST_PAUSED        = "paused"
+    ST_RESULT        = "result"
+    ST_CONFIRM       = "confirm"        # 提交成绩二次确认
+    ST_REPLAY_CONFIRM = "replay_confirm" # 通关后再玩一次二次确认
 
     def __init__(self):
         pygame.init()
         self.screen = pygame.display.set_mode((WIN_W, WIN_H))
         pygame.display.set_caption("鬼谷无双连连看")
-        pygame.display.set_icon(pygame.image.load(resource_path("img/1.png")))
+        pygame.display.set_icon(pygame.image.load(resource_path("ggimg/1.png")))
         self.clock = pygame.time.Clock()
 
         self.F_LG = _font(30)
@@ -464,7 +466,7 @@ class LinkGame:
         self.F_SM = _font(17)
         self.F_XS = _font(14)
 
-        self._load_images()
+        self._load_static_images()
 
         # 跨关卡累计分（整场游戏重置才清零）
         self.total_score    = 0
@@ -473,22 +475,12 @@ class LinkGame:
         self._start_level()
 
     # ── 资源 ──────────────────────────────────────────────
-    def _load_images(self):
-        sz = (TILE - 10, TILE - 10)
-        self.imgs = {0: None}
-        for i in range(1, IMG_COUNT + 1):
-            try:
-                raw = pygame.image.load(resource_path(f"img/{i}.png")).convert_alpha()
-                self.imgs[i] = pygame.transform.smoothscale(raw, sz)
-            except Exception:
-                s = pygame.Surface(sz, pygame.SRCALPHA)
-                s.fill((180, 180, 200, 180))
-                self.imgs[i] = s
-
+    def _load_static_images(self):
+        """只加载一次的特殊图片（表情、星星等）"""
         def _load(name, size):
             try:
                 return pygame.transform.smoothscale(
-                    pygame.image.load(resource_path(f"img/{name}")).convert_alpha(), size)
+                    pygame.image.load(resource_path(f"ggimg/{name}")).convert_alpha(), size)
             except Exception:
                 return None
 
@@ -496,6 +488,20 @@ class LinkGame:
         self.img_sick     = _load("sick.png",     (120, 120))
         self.img_star_on  = _load("Star_01.png",  (50, 50))
         self.img_star_off = _load("star_dark.png",(50, 50))
+
+    def _load_tile_images(self):
+        """每关随机从图库中抽取 IMG_COUNT 张图片加载"""
+        sz = (TILE - 10, TILE - 10)
+        self.selected_ids = random.sample(range(1, TOTAL_IMGS + 1), IMG_COUNT)
+        self.imgs = {0: None}
+        for idx, file_id in enumerate(self.selected_ids, start=1):
+            try:
+                raw = pygame.image.load(resource_path(f"ggimg/{file_id}.png")).convert_alpha()
+                self.imgs[idx] = pygame.transform.smoothscale(raw, sz)
+            except Exception:
+                s = pygame.Surface(sz, pygame.SRCALPHA)
+                s.fill((180, 180, 200, 180))
+                self.imgs[idx] = s
 
     # ── 关卡初始化 ────────────────────────────────────────
     def _start_level(self):
@@ -509,6 +515,7 @@ class LinkGame:
         self.tool_shuffle = tools["shuffle"]
         self.tool_hint    = tools["hint"]
 
+        self._load_tile_images()
         self.board        = make_board()
         self.selected     = None
         self.path         = []
@@ -528,8 +535,10 @@ class LinkGame:
         self.btn_replay  = None
         self.btn_next    = None
         self.btn_submit  = None
-        self.btn_confirm = None
-        self.btn_cancel  = None
+        self.btn_confirm       = None
+        self.btn_cancel        = None
+        self.btn_replay_ok     = None
+        self.btn_replay_cancel = None
 
         self._build_rects()
 
@@ -593,6 +602,8 @@ class LinkGame:
                 pos = ev.pos
                 if self.state == self.ST_CONFIRM:
                     self._click_confirm(pos)
+                elif self.state == self.ST_REPLAY_CONFIRM:
+                    self._click_replay_confirm(pos)
                 elif self.state == self.ST_RESULT:
                     self._click_result(pos)
                 elif self.state == self.ST_PAUSED:
@@ -635,13 +646,16 @@ class LinkGame:
                 self.selected = (r, c)
 
     def _click_result(self, pos):
-        if self.btn_replay  and self.btn_replay.collidepoint(pos):
-            # 再玩一次：永远从第一关开始，所有数据清空
-            self._full_restart()
-        if self.btn_next    and self.btn_next.collidepoint(pos):
+        if self.btn_replay and self.btn_replay.collidepoint(pos):
+            # 全部通关后再玩一次：弹二次确认；失败时直接重玩
+            if self.win and self.current_level >= len(LEVELS) - 1:
+                self.state = self.ST_REPLAY_CONFIRM
+            else:
+                self._full_restart()
+        if self.btn_next and self.btn_next.collidepoint(pos):
             self.current_level += 1
             self._start_level()
-        if self.btn_submit  and self.btn_submit.collidepoint(pos):
+        if self.btn_submit and self.btn_submit.collidepoint(pos):
             self.state = self.ST_CONFIRM
 
     def _click_confirm(self, pos):
@@ -682,6 +696,12 @@ class LinkGame:
             self.state = self.ST_RESULT
             _show_popup("成功" if success else "提示", msg)
         if self.btn_cancel  and self.btn_cancel.collidepoint(pos):
+            self.state = self.ST_RESULT
+
+    def _click_replay_confirm(self, pos):
+        if self.btn_replay_ok and self.btn_replay_ok.collidepoint(pos):
+            self._full_restart()
+        if self.btn_replay_cancel and self.btn_replay_cancel.collidepoint(pos):
             self.state = self.ST_RESULT
 
     def _toggle_pause(self):
@@ -778,8 +798,11 @@ class LinkGame:
         elif self.state == self.ST_RESULT:
             self._draw_result()
         elif self.state == self.ST_CONFIRM:
-            self._draw_result()         # 底层还是结算界面
-            self._draw_confirm_dialog() # 弹出确认框
+            self._draw_result()
+            self._draw_confirm_dialog()
+        elif self.state == self.ST_REPLAY_CONFIRM:
+            self._draw_result()
+            self._draw_replay_confirm_dialog()
 
         pygame.display.flip()
 
@@ -1041,6 +1064,52 @@ class LinkGame:
                  CONFIRM_C, self.btn_confirm.collidepoint(mx, my))
         draw_btn(self.screen, self.F_MD, self.btn_cancel,  "取  消",
                  CANCEL_C,  self.btn_cancel.collidepoint(mx, my))
+
+    # ── 再玩一次二次确认弹窗 ──────────────────────────────
+    def _draw_replay_confirm_dialog(self):
+        ov = pygame.Surface((WIN_W, WIN_H), pygame.SRCALPHA)
+        ov.fill((0, 0, 0, 120))
+        self.screen.blit(ov, (0, 0))
+
+        dw, dh = 480, 260
+        dx = (WIN_W - dw) // 2
+        dy = (WIN_H - dh) // 2
+
+        dlg = pygame.Surface((dw, dh), pygame.SRCALPHA)
+        pygame.draw.rect(dlg, (20, 30, 70, 245), dlg.get_rect(), border_radius=16)
+        pygame.draw.rect(dlg, GOLD, dlg.get_rect(), 2, border_radius=16)
+        self.screen.blit(dlg, (dx, dy))
+
+        cx = dx + dw // 2
+
+        # 标题
+        t_title = self.F_MD.render("恭喜！全部关卡已通关", True, GOLD)
+        self.screen.blit(t_title, t_title.get_rect(center=(cx, dy + 40)))
+
+        # 正文
+        line1 = self.F_SM.render("建议优先提交成绩，再决定是否重玩", True, WHITE)
+        line2 = self.F_SM.render(f"重新开始将清空当前累计 {self.total_score} 分", True, ORANGE)
+        line3 = self.F_XS.render("确定要放弃成绩重新开始吗？", True, (180, 210, 255))
+        self.screen.blit(line1, line1.get_rect(center=(cx, dy + 90)))
+        self.screen.blit(line2, line2.get_rect(center=(cx, dy + 120)))
+        self.screen.blit(line3, line3.get_rect(center=(cx, dy + 148)))
+
+        pygame.draw.line(self.screen, (60, 80, 140),
+                         (dx + 20, dy + 168), (dx + dw - 20, dy + 168), 1)
+
+        mx, my = pygame.mouse.get_pos()
+        bw, bh, gap = 160, 44, 20
+        bx0 = cx - bw - gap // 2
+        bx1 = cx + gap // 2
+        by  = dy + 182
+
+        self.btn_replay_ok     = pygame.Rect(bx0, by, bw, bh)
+        self.btn_replay_cancel = pygame.Rect(bx1, by, bw, bh)
+
+        draw_btn(self.screen, self.F_MD, self.btn_replay_ok,
+                 "继续重玩", CONFIRM_C, self.btn_replay_ok.collidepoint(mx, my))
+        draw_btn(self.screen, self.F_MD, self.btn_replay_cancel,
+                 "去提交成绩", SUBMIT_C, self.btn_replay_cancel.collidepoint(mx, my))
 
 
 # ══════════════════════════════════════════════════════════
