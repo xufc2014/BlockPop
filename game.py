@@ -17,11 +17,11 @@ from datetime import datetime
 
 
 def resource_path(relative_path):
-    """兼容开发环境和 PyInstaller 单文件模式的资源路径"""
+    """兼容开发环境、PyInstaller、Nuitka 单文件模式的资源路径"""
     try:
         base_path = sys._MEIPASS
     except AttributeError:
-        base_path = os.path.abspath(".")
+        base_path = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(base_path, relative_path)
 
 
@@ -182,7 +182,11 @@ def _save_records(records):
 
 
 def _has_submitted(role_id):
-    return _load_records().get(str(role_id), {}).get("count", 0) > 0
+    record = _load_records().get(str(role_id), {})
+    if record.get("count", 0) <= 0:
+        return False
+    today = datetime.now().strftime("%Y-%m-%d")
+    return record.get("date", "") == today
 
 
 def _mark_submitted(role_id):
@@ -222,10 +226,10 @@ if not _args.role_id or _args.role_id == "0":
         import tkinter as tk
         from tkinter import messagebox
         _root = tk.Tk(); _root.withdraw()
-        messagebox.showerror("启动失败", "缺少必要参数 role_id，游戏无法启动。\n请通过外部程序正确传入参数。")
+        messagebox.showerror("启动失败", "启动失败，请通过游戏内启动。")
         _root.destroy()
     except Exception:
-        print("[ERROR] 缺少必要参数 role_id，游戏无法启动。")
+        pass
     sys.exit(1)
 
 # ══════════════════════════════════════════════════════════
@@ -891,6 +895,10 @@ class LinkGame:
 
     # ── 暂停 ──────────────────────────────────────────────
     def _draw_pause(self):
+        # 用纯色块盖住整个棋盘区域，防止玩家暂停后观察棋盘
+        board_rect = (0, MARGIN_Y, WIN_W, ROWS * TILE + 50)
+        pygame.draw.rect(self.screen, HDR, board_rect)
+
         ov = pygame.Surface((WIN_W, WIN_H), pygame.SRCALPHA)
         ov.fill((0, 10, 40, 165))
         self.screen.blit(ov, (0, 0))

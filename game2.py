@@ -17,11 +17,14 @@ from datetime import datetime
 
 
 def resource_path(relative_path):
-    """兼容开发环境和 PyInstaller 单文件模式的资源路径"""
+    """兼容开发环境、PyInstaller、Nuitka 单文件模式的资源路径"""
     try:
+        # PyInstaller onefile: 解压到 sys._MEIPASS 临时目录
         base_path = sys._MEIPASS
     except AttributeError:
-        base_path = os.path.abspath(".")
+        # Nuitka onefile: __file__ 指向临时解压目录
+        # 开发环境: __file__ 指向源码所在目录
+        base_path = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(base_path, relative_path)
 
 
@@ -66,25 +69,25 @@ def send_email2(UserID, WorldID, ActorID, GoodsID, Quantity, score=0, play_secon
         f"&timestamp={data['Timestamp']}&app_key={app_key}"
     )
 
-    print("[邮件] 签名原文：", sign_for_md5)
+    # print("[邮件] 签名原文：", sign_for_md5)
     sign = hashlib.md5(sign_for_md5.encode()).hexdigest()
-    print("[邮件] MD5签名：", sign)
+    # print("[邮件] MD5签名：", sign)
 
     data["Sign"] = sign
     new_url = url + parse.urlencode(data)
-    print("[邮件] 请求URL：", new_url)
+    # print("[邮件] 请求URL：", new_url)
 
     try:
         res = requests.get(url=new_url, timeout=10)
-        print("[邮件] 响应：", res.text)
+        # print("[邮件] 响应原文：", res.text)
         if res.json().get("code") == 1:
-            print("[邮件] 发送成功：", res.json().get("message"))
+            # print("[邮件] 发送成功：", res.json().get("message"))
             return True, "游戏奖励已发送，请2分钟后在游戏内的邮件查看"
         else:
-            print("[邮件] 发送失败：", res.json())
+            # print("[邮件] 发送失败：", res.json())
             return False, "奖励发放失败，请联系GM"
     except Exception as e:
-        print("[邮件] 请求异常：", e)
+        # print("[邮件] 请求异常：", e)
         return False, f"奖励发放失败，请联系GM\n({e})"
 
 
@@ -182,7 +185,11 @@ def _save_records(records):
 
 
 def _has_submitted(role_id):
-    return _load_records().get(str(role_id), {}).get("count", 0) > 0
+    record = _load_records().get(str(role_id), {})
+    if record.get("count", 0) <= 0:
+        return False
+    today = datetime.now().strftime("%Y-%m-%d")
+    return record.get("date", "") == today
 
 
 def _mark_submitted(role_id):
@@ -222,10 +229,10 @@ if not _args.role_id or _args.role_id == "0":
         import tkinter as tk
         from tkinter import messagebox
         _root = tk.Tk(); _root.withdraw()
-        messagebox.showerror("启动失败", "缺少必要参数 role_id，游戏无法启动。\n请通过外部程序正确传入参数。")
+        messagebox.showerror("启动失败", "启动失败，请通过游戏内启动。")
         _root.destroy()
     except Exception:
-        print("[ERROR] 缺少必要参数 role_id，游戏无法启动。")
+        pass
     sys.exit(1)
 
 # ══════════════════════════════════════════════════════════
@@ -666,17 +673,17 @@ class LinkGame:
                 _show_popup("提示", "您今天已经提交过成绩了，每个角色每天只能提交一次哦~")
                 return
 
-            # 打印启动时传入的玩家信息
-            print("=" * 50)
-            print("[提交成绩] 玩家信息：")
-            print(f"  role_name  = {_args.role_name}")
-            print(f"  role_id    = {_args.role_id}")
-            print(f"  nAccountID = {_args.nAccountID}")
-            print(f"  nWorldID   = {_args.nWorldID}")
-            print(f"  level      = {_args.level}")
-            print(f"  vip_lv     = {_args.vip_lv}")
-            print(f"  总分        = {self.total_score}")
-            print("=" * 50)
+            # # 打印启动时传入的玩家信息
+            # print("=" * 50)
+            # print("[提交成绩] 玩家信息：")
+            # print(f"  role_name  = {_args.role_name}")
+            # print(f"  role_id    = {_args.role_id}")
+            # print(f"  nAccountID = {_args.nAccountID}")
+            # print(f"  nWorldID   = {_args.nWorldID}")
+            # print(f"  level      = {_args.level}")
+            # print(f"  vip_lv     = {_args.vip_lv}")
+            # print(f"  总分        = {self.total_score}")
+            # print("=" * 50)
 
             # 发送邮件（使用传入的玩家参数）
             success, msg = send_email2(
@@ -914,6 +921,10 @@ class LinkGame:
 
     # ── 暂停 ──────────────────────────────────────────────
     def _draw_pause(self):
+        # 用纯色块盖住整个棋盘区域，防止玩家暂停后观察棋盘
+        board_rect = (0, MARGIN_Y, WIN_W, ROWS * TILE + 50)
+        pygame.draw.rect(self.screen, HDR, board_rect)
+
         ov = pygame.Surface((WIN_W, WIN_H), pygame.SRCALPHA)
         ov.fill((0, 10, 40, 165))
         self.screen.blit(ov, (0, 0))
