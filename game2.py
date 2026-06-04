@@ -10,10 +10,7 @@ import calendar
 import time
 import json
 import requests
-import winreg
-import base64
 from urllib import parse
-from datetime import datetime
 
 
 def resource_path(relative_path):
@@ -110,98 +107,6 @@ def _show_popup(title, message):
     pygame.quit()
     sys.exit()
 
-
-# ══════════════════════════════════════════════════════════
-# 提交次数限制（双写：文件 + 注册表，MD5签名防篡改）
-# ══════════════════════════════════════════════════════════
-_SUBMIT_SALT = "gxwsd_2024_game_k9#mP"
-_REG_KEY     = r"Software\GGWSDGame"
-_REG_VAL     = "d"
-
-
-def _data_path():
-    appdata = os.environ.get("APPDATA", os.path.expanduser("~"))
-    folder  = os.path.join(appdata, "GGWSDGame")
-    os.makedirs(folder, exist_ok=True)
-    return os.path.join(folder, "gdata.dat")
-
-
-def _make_sig(role_id, count):
-    raw = f"{role_id}:{count}:{_SUBMIT_SALT}"
-    return hashlib.md5(raw.encode()).hexdigest()
-
-
-def _load_records():
-    """从文件和注册表各读一份，合并取最大有效值"""
-    def _parse(text):
-        try:
-            return json.loads(base64.b64decode(text).decode())
-        except Exception:
-            return {}
-
-    file_data = {}
-    try:
-        with open(_data_path(), "r", encoding="utf-8") as f:
-            file_data = _parse(f.read().strip())
-    except Exception:
-        pass
-
-    reg_data = {}
-    try:
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _REG_KEY, 0, winreg.KEY_READ)
-        val, _ = winreg.QueryValueEx(key, _REG_VAL)
-        winreg.CloseKey(key)
-        reg_data = _parse(val)
-    except Exception:
-        pass
-
-    merged = {}
-    for k in set(list(file_data.keys()) + list(reg_data.keys())):
-        fc = file_data.get(k, {}).get("count", 0)
-        rc = reg_data.get(k,  {}).get("count", 0)
-        entry = (file_data if fc >= rc else reg_data).get(k, {})
-        sig_ok = entry.get("sig") == _make_sig(k, entry.get("count", 0))
-        if sig_ok:
-            merged[k] = entry
-        elif fc > 0 or rc > 0:
-            # 签名无效但有记录 → 保守阻止（防止篡改绕过）
-            merged[k] = {"count": max(fc, rc), "sig": ""}
-    return merged
-
-
-def _save_records(records):
-    encoded = base64.b64encode(json.dumps(records).encode()).decode()
-    try:
-        with open(_data_path(), "w", encoding="utf-8") as f:
-            f.write(encoded)
-    except Exception as e:
-        print(f"[限制] 文件写入失败: {e}")
-    try:
-        key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, _REG_KEY)
-        winreg.SetValueEx(key, _REG_VAL, 0, winreg.REG_SZ, encoded)
-        winreg.CloseKey(key)
-    except Exception as e:
-        print(f"[限制] 注册表写入失败: {e}")
-
-
-def _has_submitted(role_id):
-    record = _load_records().get(str(role_id), {})
-    if record.get("count", 0) <= 0:
-        return False
-    today = datetime.now().strftime("%Y-%m-%d")
-    return record.get("date", "") == today
-
-
-def _mark_submitted(role_id):
-    records = _load_records()
-    k       = str(role_id)
-    count   = records.get(k, {}).get("count", 0) + 1
-    records[k] = {
-        "count": count,
-        "date":  datetime.now().strftime("%Y-%m-%d"),
-        "sig":   _make_sig(k, count),
-    }
-    _save_records(records)
 
 
 # ══════════════════════════════════════════════════════════
@@ -667,24 +572,6 @@ class LinkGame:
 
     def _click_confirm(self, pos):
         if self.btn_confirm and self.btn_confirm.collidepoint(pos):
-            # 检查当前角色是否已提交过
-            if _has_submitted(_args.role_id):
-                self.state = self.ST_RESULT
-                _show_popup("提示", "您今天已经提交过成绩了，每个角色每天只能提交一次哦~")
-                return
-
-            # # 打印启动时传入的玩家信息
-            # print("=" * 50)
-            # print("[提交成绩] 玩家信息：")
-            # print(f"  role_name  = {_args.role_name}")
-            # print(f"  role_id    = {_args.role_id}")
-            # print(f"  nAccountID = {_args.nAccountID}")
-            # print(f"  nWorldID   = {_args.nWorldID}")
-            # print(f"  level      = {_args.level}")
-            # print(f"  vip_lv     = {_args.vip_lv}")
-            # print(f"  总分        = {self.total_score}")
-            # print("=" * 50)
-
             # 发送邮件（使用传入的玩家参数）
             success, msg = send_email2(
                 UserID=int(_args.nAccountID),
@@ -695,10 +582,6 @@ class LinkGame:
                 score=self.total_score,
                 play_seconds=int(self.play_seconds),
             )
-
-            # 发送成功才记录（失败可以重试）
-            if success:
-                _mark_submitted(_args.role_id)
 
             self.state = self.ST_RESULT
             _show_popup("成功" if success else "提示", msg)
