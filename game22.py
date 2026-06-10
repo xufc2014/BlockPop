@@ -89,7 +89,7 @@ def send_email2(UserID, WorldID, ActorID, GoodsID, Quantity, score=0, play_secon
 
 
 def _show_popup(title, message):
-    """用 tkinter 弹出提示框，点击确定后关闭游戏"""
+    """用 tkinter 弹出提示框（不阻塞 pygame 主线程之外的资源）"""
     try:
         import tkinter as tk
         from tkinter import messagebox
@@ -103,10 +103,9 @@ def _show_popup(title, message):
         root.destroy()
     except Exception as e:
         print(f"[弹窗] {title}: {message} (tkinter 不可用: {e})")
-    finally:
-        # 点击确定后关闭游戏窗口
-        pygame.quit()
-        sys.exit()
+    # 点击确定后关闭游戏窗口
+    pygame.quit()
+    sys.exit()
 
 
 
@@ -169,25 +168,25 @@ TOOL_CONFIG  = {
 }
 
 # 关卡配置：name 关卡名  time_limit 限时秒数
-# 时间范围：第一关 300 秒（5分钟）到第五关 180 秒（3分钟），线性递减
 LEVELS = [
-    {"name": "第一关", "time_limit": 300},
-    {"name": "第二关", "time_limit": 270},
-    {"name": "第三关", "time_limit": 240},
-    {"name": "第四关", "time_limit": 210},
-    {"name": "第五关", "time_limit": 180},
+    {"name": "第一关", "time_limit": 180},
+    {"name": "第二关", "time_limit": 150},
+    {"name": "第三关", "time_limit": 120},
+    {"name": "第四关", "time_limit": 100},
+    {"name": "第五关", "time_limit": 90},
 ]
 
-# 星级评分阈值（剩余时间 / 限时），对应 1~3 星
-# 1星：剩余时间 > 1%   | 2星：剩余时间 > 33% | 3星：剩余时间 > 66%（完美通关）
-STAR_THRESHOLDS = [0.0, 0.01, 0.33, 0.66]
+# 星级评分阈值（剩余时间 / 限时），对应 1~5 星
+STAR_THRESHOLDS = [0.0, 0.15, 0.35, 0.55, 0.70, 0.85]
 
 # 星级额外奖励分（在本关基础消除分之上加）
-# 设计思路：3星为完美通关最高评价，给予最高奖励
+# 设计思路：5星翻倍最诱人，4星也很可观，1星仅基础分
 STAR_BONUS = {
     1: 0,    # 1星：无奖励，基础消除分
-    2: 100,  # 2星：+100 分
-    3: 300,  # 3星：+300 分（完美通关奖励）
+    2: 50,   # 2星：+50 分
+    3: 150,  # 3星：+150 分
+    4: 350,  # 4星：+350 分
+    5: 700,  # 5星：+700 分（豪华奖励）
 }
 
 # ══════════════════════════════════════════════════════════
@@ -317,19 +316,11 @@ def shuffle_board(board):
 
 
 def calc_stars(time_left, time_limit):
-    """根据剩余时间比例计算星级（1-3星）"""
     ratio = time_left / max(time_limit, 1)
-    # STAR_THRESHOLDS = [0.0, 0.01, 0.33, 0.66]
-    # 索引: 0     1     2     3
-    # 对应: 无   1星  2星   3星
-    if ratio >= 0.66:
-        return 3
-    elif ratio >= 0.33:
-        return 2
-    elif ratio > 0.01:
-        return 1
-    else:
-        return 1  # 至少1星
+    for s in range(5, 0, -1):
+        if ratio >= STAR_THRESHOLDS[s]:
+            return s
+    return 1
 
 
 def star_pts(cx, cy, outer, inner):
@@ -374,11 +365,9 @@ class LinkGame:
     ST_RESULT        = "result"
     ST_CONFIRM       = "confirm"        # 提交成绩二次确认
     ST_REPLAY_CONFIRM = "replay_confirm" # 通关后再玩一次二次确认
-    ST_SUBMIT_RESULT = "submit_result"  # 提交邮件后的结果界面
 
     def __init__(self):
         pygame.init()
-        pygame.mixer.init()
         self.screen = pygame.display.set_mode((WIN_W, WIN_H))
         pygame.display.set_caption("鬼谷无双连连看")
         pygame.display.set_icon(pygame.image.load(resource_path("ggimg/1.png")))
@@ -389,12 +378,7 @@ class LinkGame:
         self.F_SM = _font(17)
         self.F_XS = _font(14)
 
-        # 音频状态（必须在 _start_level 之前初始化）
-        self.muted  = False
-        self.volume = 0.5
-
         self._load_static_images()
-        self._load_audio()
 
         # 跨关卡累计分（整场游戏重置才清零）
         self.total_score    = 0
@@ -416,20 +400,6 @@ class LinkGame:
         self.img_sick     = _load("sick.png",     (120, 120))
         self.img_star_on  = _load("Star_01.png",  (50, 50))
         self.img_star_off = _load("star_dark.png",(50, 50))
-
-    def _load_audio(self):
-        """加载背景音乐和音效"""
-        try:
-            pygame.mixer.music.load(resource_path("Sound/bg_music.mp3"))
-            pygame.mixer.music.set_volume(self.volume)
-            pygame.mixer.music.play(-1)  # -1 = 循环播放
-        except Exception:
-            pass
-        try:
-            self.snd_gameover = pygame.mixer.Sound(resource_path("Sound/game-over.wav"))
-            self.snd_gameover.set_volume(self.volume)
-        except Exception:
-            self.snd_gameover = None
 
     def _load_tile_images(self):
         """每关随机从图库中抽取 IMG_COUNT 张图片加载"""
@@ -473,10 +443,6 @@ class LinkGame:
         self.result_bonus  = 0
         self.result_total  = 0  # 本关最终得分 = score + bonus
 
-        # 邮件提交结果
-        self.submit_success = False
-        self.submit_message = ""
-
         # 动态按钮
         self.btn_replay  = None
         self.btn_next    = None
@@ -485,7 +451,6 @@ class LinkGame:
         self.btn_cancel        = None
         self.btn_replay_ok     = None
         self.btn_replay_cancel = None
-        self.btn_submit_ok     = None
 
         self._build_rects()
 
@@ -497,7 +462,6 @@ class LinkGame:
         self._start_level()
 
     def _build_rects(self):
-        self.btn_mute    = pygame.Rect(WIN_W - 226, 8, 104, 34)
         self.btn_pause   = pygame.Rect(WIN_W - 112, 8, 104, 34)
         bw, bh, gap = 82, 30, 7
         bx, by = MARGIN_X, 108
@@ -552,22 +516,16 @@ class LinkGame:
                     self._click_confirm(pos)
                 elif self.state == self.ST_REPLAY_CONFIRM:
                     self._click_replay_confirm(pos)
-                elif self.state == self.ST_SUBMIT_RESULT:
-                    self._click_submit_result(pos)
                 elif self.state == self.ST_RESULT:
                     self._click_result(pos)
                 elif self.state == self.ST_PAUSED:
                     if self.btn_pause.collidepoint(pos):
                         self._toggle_pause()
-                    elif self.btn_mute.collidepoint(pos):
-                        self._toggle_mute()
                 else:
                     self._click_header(pos)
                     self._click_board(pos)
 
     def _click_header(self, pos):
-        if self.btn_mute.collidepoint(pos):
-            self._toggle_mute(); return
         if self.btn_pause.collidepoint(pos):
             self._toggle_pause(); return
         if self.btn_restart.collidepoint(pos):
@@ -625,10 +583,8 @@ class LinkGame:
                 play_seconds=int(self.play_seconds),
             )
 
-            # 保存提交结果，进入提交结果显示状态
-            self.submit_success = success
-            self.submit_message = msg
-            self.state = self.ST_SUBMIT_RESULT
+            self.state = self.ST_RESULT
+            _show_popup("成功" if success else "提示", msg)
         if self.btn_cancel  and self.btn_cancel.collidepoint(pos):
             self.state = self.ST_RESULT
 
@@ -638,23 +594,11 @@ class LinkGame:
         if self.btn_replay_cancel and self.btn_replay_cancel.collidepoint(pos):
             self.state = self.ST_RESULT
 
-    def _click_submit_result(self, pos):
-        if self.btn_submit_ok and self.btn_submit_ok.collidepoint(pos):
-            pygame.quit()
-            sys.exit()
-
     def _toggle_pause(self):
         if self.state == self.ST_PLAYING:
             self.state = self.ST_PAUSED
         elif self.state == self.ST_PAUSED:
             self.state = self.ST_PLAYING
-
-    def _toggle_mute(self):
-        self.muted = not self.muted
-        vol = 0.0 if self.muted else self.volume
-        pygame.mixer.music.set_volume(vol)
-        if self.snd_gameover:
-            self.snd_gameover.set_volume(vol)
 
     # ── 游戏动作 ──────────────────────────────────────────
     def _do_match(self, r1, c1, r2, c2, path):
@@ -712,8 +656,6 @@ class LinkGame:
             self.result_stars = 0
             self.result_bonus = 0
             self.result_total = self.score
-            if self.snd_gameover and not self.muted:
-                self.snd_gameover.play()
 
     # ── 更新 ──────────────────────────────────────────────
     def _update(self, dt):
@@ -751,9 +693,6 @@ class LinkGame:
         elif self.state == self.ST_REPLAY_CONFIRM:
             self._draw_result()
             self._draw_replay_confirm_dialog()
-        elif self.state == self.ST_SUBMIT_RESULT:
-            self._draw_result()
-            self._draw_submit_result_dialog()
 
         pygame.display.flip()
 
@@ -792,11 +731,6 @@ class LinkGame:
             else:
                 pygame.draw.circle(self.screen, HDR2,           (dcx, dcy), dot_r)
                 pygame.draw.circle(self.screen, (120, 160, 210),(dcx, dcy), dot_r, 2)
-
-        # 静音按钮
-        hm = self.btn_mute.collidepoint(mx, my)
-        mtxt = "已静音" if self.muted else "音乐开"
-        draw_btn(self.screen, self.F_SM, self.btn_mute, mtxt, (80, 100, 60), hm)
 
         # 暂停按钮
         hp = self.btn_pause.collidepoint(mx, my)
@@ -916,10 +850,10 @@ class LinkGame:
         # 星星（仅通关时）
         if self.win:
             sw, gap_s = 50, 8
-            total_sw = sw * 3 + gap_s * 2
+            total_sw = sw * 5 + gap_s * 4
             sx = cx - total_sw // 2
             sy = top + 175
-            for i in range(3):
+            for i in range(5):
                 img = self.img_star_on if i < self.result_stars else self.img_star_off
                 if img:
                     self.screen.blit(img, (sx + i * (sw + gap_s), sy))
@@ -929,16 +863,7 @@ class LinkGame:
                         self.screen, col,
                         star_pts(sx + i*(sw+gap_s) + sw//2, sy + sw//2, sw//2, sw//4))
 
-            # 动态计算时间阈值提示
-            time_1 = int(self.time_limit * 0.01)    # 1% 的时间
-            time_2 = int(self.time_limit * 0.33)    # 33% 的时间
-            time_3 = int(self.time_limit * 0.66)    # 66% 的时间
-
-            STAR_LABELS = {
-                1: f"及格通关(剩余时间>{time_1}秒)",
-                2: f"优秀通关(剩余时间>{time_2}秒)",
-                3: f"完美通关(剩余时间>{time_3}秒)"
-            }
+            STAR_LABELS = {1:"初级完成", 2:"良好完成", 3:"优秀完成", 4:"精彩完成", 5:"完美通关！"}
             sl = self.F_SM.render(STAR_LABELS[self.result_stars], True, GOLD)
             self.screen.blit(sl, sl.get_rect(center=(cx, top + 238)))
 
@@ -1080,72 +1005,7 @@ class LinkGame:
         draw_btn(self.screen, self.F_MD, self.btn_replay_cancel,
                  "去提交成绩", SUBMIT_C, self.btn_replay_cancel.collidepoint(mx, my))
 
-    # ── 提交成绩结果弹窗 ────────────────────────────────────
-    def _draw_submit_result_dialog(self):
-        # 半透明遮罩
-        ov = pygame.Surface((WIN_W, WIN_H), pygame.SRCALPHA)
-        ov.fill((0, 0, 0, 100))
-        self.screen.blit(ov, (0, 0))
-
-        dw, dh = 480, 260
-        dx = (WIN_W - dw) // 2
-        dy = (WIN_H - dh) // 2
-
-        # 弹窗面板
-        dlg = pygame.Surface((dw, dh), pygame.SRCALPHA)
-        panel_color = (20, 70, 30, 245) if self.submit_success else (70, 20, 20, 245)
-        pygame.draw.rect(dlg, panel_color, dlg.get_rect(), border_radius=16)
-        border_color = GREEN if self.submit_success else RED
-        pygame.draw.rect(dlg, border_color, dlg.get_rect(), 2, border_radius=16)
-        self.screen.blit(dlg, (dx, dy))
-
-        cx = dx + dw // 2
-
-        # 标题
-        title_text = "成绩提交成功！" if self.submit_success else "成绩提交失败"
-        title_color = GREEN if self.submit_success else RED
-        t_title = self.F_MD.render(title_text, True, title_color)
-        self.screen.blit(t_title, t_title.get_rect(center=(cx, dy + 40)))
-
-        # 提示信息
-        lines = self.submit_message.split('\n')
-        y_offset = 100
-        for line in lines:
-            t_msg = self.F_SM.render(line, True, WHITE)
-            self.screen.blit(t_msg, t_msg.get_rect(center=(cx, dy + y_offset)))
-            y_offset += 35
-
-        # 分隔线
-        pygame.draw.line(self.screen, (60, 80, 140),
-                         (dx + 20, dy + 200), (dx + dw - 20, dy + 200), 1)
-
-        # 确定按钮
-        mx, my = pygame.mouse.get_pos()
-        bw, bh = 180, 44
-        bx = cx - bw // 2
-        by = dy + 218
-
-        self.btn_submit_ok = pygame.Rect(bx, by, bw, bh)
-        draw_btn(self.screen, self.F_MD, self.btn_submit_ok, "关  闭",
-                 CONFIRM_C if self.submit_success else RED,
-                 self.btn_submit_ok.collidepoint(mx, my))
-
 
 # ══════════════════════════════════════════════════════════
 if __name__ == "__main__":
-    try:
-        LinkGame().run()
-    except Exception as e:
-        import traceback
-        print(f"[错误] 游戏崩溃: {e}")
-        traceback.print_exc()
-        try:
-            import tkinter as tk
-            from tkinter import messagebox
-            root = tk.Tk()
-            root.withdraw()
-            messagebox.showerror("游戏错误", f"游戏崩溃:\n{e}")
-            root.destroy()
-        except Exception:
-            pass
-
+    LinkGame().run()
