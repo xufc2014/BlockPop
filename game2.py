@@ -10,7 +10,6 @@ import calendar
 import time
 import json
 import requests
-from urllib import parse
 
 
 def resource_path(relative_path):
@@ -26,66 +25,58 @@ def resource_path(relative_path):
 
 
 # ══════════════════════════════════════════════════════════
-# 邮件发送接口
+# 小游戏结果上报接口
 # ══════════════════════════════════════════════════════════
-def send_email2(UserID, WorldID, ActorID, GoodsID, Quantity, score=0, play_seconds=0):
+# 接口文档：mini-game-result-submit-api.md
+# 内网地址：http://gameapi.test.q1.com/api/Game/SubmitMinGameResult
+# 正式地址：http://gameapi.q1.com/api/Game/SubmitMinGameResult
+_SUBMIT_URL = "https://gameapi.q1.com/api/Game/SubmitMinGameResult"
+_APPID      = 1       # 小游戏应用ID，由平台分配（待替换）
+_GAME_ID    = 6       # 平台游戏ID
+_SECRET_KEY = "4c9fa5bbbc8342c5a015b3036c6bdf7e"
+
+
+def submit_game_result(nAccountID, role_id, nWorldID, score, level_reached, stars, play_seconds):
     """
-    内网邮件发送接口（app_key 找阿江要）
-    内网地址：http://gameapi.test.q1.com/api/Game/SendGameAwardsEmail
-    正式地址：http://gameapi.q1.com/api/Game/SendGameAwardsEmail
-    返回值：(success: bool, message: str)
+    上报小游戏结果，返回 (success: bool, message: str)
+    签名顺序：appid + game_id + nAccountID + role_id + nWorldID + result + score + timestamp + SECRET_KEY
     """
-    url = "http://gameapi.q1.com/api/Game/SendGameAwardsEmail?"
+    timestamp  = calendar.timegm(time.gmtime())
 
-    data = {
-        "GameID":      6,
-        "UserID":      UserID,
-        "WorldID":     WorldID,
-        "ActorID":     ActorID,
-        "GoodsID":     GoodsID,
-        "Quantity":    Quantity,
-        "EmailTopic":  "休闲时刻",
-        "EmailText":   (
-            f"感谢您参与鬼谷无双休闲小休息，"
-            f"游戏时长{play_seconds}秒，"
-            f"你本次的游戏积分为{score}，"
-            f"请及时领取您的奖励，祝您游戏愉快。"
-        ),
-        "LifeTimeLong": 1,
-        "Timestamp":   calendar.timegm(time.gmtime()),
-        "limitKey":    "game_gxbb",
-    }
-
-    app_key = "*@!szgla#bc%~D118109D-1678-47CE-ACC3-5685B6F603BE*"
-
-    sign_for_md5 = (
-        f"gameid=6&worldid={data['WorldID']}&userid={data['UserID']}"
-        f"&actorid={data['ActorID']}&goodsid={data['GoodsID']}"
-        f"&quantity={data['Quantity']}&emailtopic={data['EmailTopic']}"
-        f"&emailtext={data['EmailText']}&lifetimelong={data['LifeTimeLong']}"
-        f"&timestamp={data['Timestamp']}&app_key={app_key}"
+    # result 为扩展信息，平台仅保存不解析；奖励匹配以顶层 score 为准
+    result_str = json.dumps(
+        {"level_reached": level_reached, "stars": stars, "play_seconds": play_seconds},
+        separators=(',', ':'), ensure_ascii=False
     )
 
-    # print("[邮件] 签名原文：", sign_for_md5)
-    sign = hashlib.md5(sign_for_md5.encode()).hexdigest()
-    # print("[邮件] MD5签名：", sign)
+    # 签名：字段直接拼接，无分隔符，result 使用上方生成的原文
+    sign_raw = (
+        f"{_APPID}{_GAME_ID}{nAccountID}{role_id}{nWorldID}"
+        f"{result_str}{score}{timestamp}{_SECRET_KEY}"
+    )
+    sign = hashlib.md5(sign_raw.encode()).hexdigest()
 
-    data["Sign"] = sign
-    new_url = url + parse.urlencode(data)
-    # print("[邮件] 请求URL：", new_url)
+    payload = {
+        "appid":      _APPID,
+        "game_id":    _GAME_ID,
+        "nAccountID": int(nAccountID),
+        "role_id":    int(role_id),
+        "nWorldID":   int(nWorldID),
+        "result":     result_str,
+        "score":      int(score),
+        "timestamp":  timestamp,
+        "sign":       sign,
+    }
 
     try:
-        res = requests.get(url=new_url, timeout=10)
-        # print("[邮件] 响应原文：", res.text)
-        if res.json().get("code") == 1:
-            # print("[邮件] 发送成功：", res.json().get("message"))
-            return True, "游戏奖励已发送，请2分钟后在游戏内的邮件查看"
+        res  = requests.post(_SUBMIT_URL, json=payload, timeout=10)
+        data = res.json()
+        if data.get("code") == 1:
+            return True, data.get("msg", "奖励已匹配，等待发放")
         else:
-            # print("[邮件] 发送失败：", res.json())
-            return False, "奖励发放失败，请联系GM"
+            return False, data.get("msg", "奖励发放失败，请联系GM")
     except Exception as e:
-        # print("[邮件] 请求异常：", e)
-        return False, f"奖励发放失败，请联系GM\n({e})"
+        return False, f"上报失败，请联系GM\n({e})"
 
 
 def _show_popup(title, message):
@@ -614,14 +605,14 @@ class LinkGame:
 
     def _click_confirm(self, pos):
         if self.btn_confirm and self.btn_confirm.collidepoint(pos):
-            # 发送邮件（使用传入的玩家参数）
-            success, msg = send_email2(
-                UserID=int(_args.nAccountID),
-                WorldID=int(_args.nWorldID),
-                ActorID=int(_args.role_id),
-                GoodsID=21601490,
-                Quantity=1,
+            # 上报游戏结果（使用传入的玩家参数）
+            success, msg = submit_game_result(
+                nAccountID=_args.nAccountID,
+                role_id=_args.role_id,
+                nWorldID=_args.nWorldID,
                 score=self.total_score,
+                level_reached=self.current_level + 1,
+                stars=self.result_stars,
                 play_seconds=int(self.play_seconds),
             )
 
