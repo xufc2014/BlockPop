@@ -9,9 +9,6 @@ __pycache__/
 *.pyc
 *.pyo
 
-# 图片资源
-img/
-ggimg/
 
 # 备份文件
 *副本*
