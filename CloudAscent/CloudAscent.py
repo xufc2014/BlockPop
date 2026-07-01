@@ -9,6 +9,7 @@ import calendar
 import time
 import json
 import math
+import atexit
 import requests
 
 # ── 工作目录：统一以 exe / 脚本所在目录为根，打包后图片路径不丢 ───────────────
@@ -57,11 +58,56 @@ PLAYER_VIP   = int(_args.vip_lv) if _args.vip_lv.isdigit() else 0
 nAccountID   = _args.nAccountID
 WORLD_ID     = _args.nWorldID
 
+# ── 运行锁文件：供 Lua 大厅检测小游戏是否存活 ─────────────────────────────────
+_RUNNING_LOCK = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])),
+                             f"running_{PLAYER_ID}.lock.txt")
+
+
+def _cleanup_lock():
+    """退出时删除运行锁文件"""
+    try:
+        if os.path.exists(_RUNNING_LOCK):
+            os.remove(_RUNNING_LOCK)
+            pass
+    except Exception:
+        pass
+
+
+try:
+    with open(_RUNNING_LOCK, 'w') as lf:
+        lf.write(f"running\npid={os.getpid()}\nts={calendar.timegm(time.gmtime())}")
+except Exception:
+    pass
+
+atexit.register(_cleanup_lock)
+
 # ── 成绩上报接口 ──────────────────────────────────────────────────────────────
-_SUBMIT_URL = "https://gameapi.q1.com/api/Game/SubmitMinGameResult"
-_APPID      = 2       # 云端冲天 appid=2
+_SUBMIT_URL = "https://gameapi.q1.com/v2/api/game/SubmitMinGameResult"
+_APPID      = 1
 _GAME_ID    = 6
 _SECRET_KEY = "4c9fa5bbbc8342c5a015b3036c6bdf7e"
+
+
+def _write_result_dat(nAccountID, role_id, nWorldID, score):
+    """游戏失败时将本局结果加密写入 result_<role_id>.dat，与 exe 同目录"""
+    try:
+        timestamp = calendar.timegm(time.gmtime())
+        ck        = (int(role_id) * 1009 + int(score) * 3001 + timestamp) % 999983
+        plain     = f"{nAccountID}|{role_id}|{nWorldID}|{score}|{timestamp}|{ck}"
+
+        key       = 'gg_secret_2025'
+        key_bytes = [ord(c) for c in key]
+        encrypted = bytes([b ^ key_bytes[i % len(key_bytes)]
+                           for i, b in enumerate(plain.encode('utf-8'))])
+        hex_str   = encrypted.hex()
+
+        exe_dir   = os.path.dirname(os.path.abspath(sys.argv[0]))
+        dat_path  = os.path.join(exe_dir, f"result_{role_id}.dat")
+
+        with open(dat_path, 'w') as f:
+            f.write(hex_str)
+    except Exception as e:
+        log(f'[dat] 写入失败: {e}')
 
 
 def submit_game_result(nAccountID, role_id, nWorldID, score, play_seconds):
@@ -1026,7 +1072,7 @@ class Cloud:
             elif key == 'shrink':
                 self.shrink_active = False
 
-    def update(self, keys, wind_force=0.0, ice_slip=False, ice_slip_dir=0):
+    def update(self, keys, ice_slip=False):
         move_mult = 1.3 if self.rocket_shoes_active else 1.0
         actual_speed = MOVE_SPEED * move_mult
 
@@ -1041,9 +1087,18 @@ class Cloud:
                 else:
                     self.vx *= 0.82
             else:
-                # 冰面滑行：强制水平移动
-                self.vx = ice_slip_dir * actual_speed * 0.8
-                self.facing_left = ice_slip_dir < 0
+                # 冰面滑行：方向改变缓慢（冰面摩擦大，仍能控制）
+                if keys[pygame.K_LEFT]:
+                    self.vx -= 0.4
+                    self.facing_left = True
+                elif keys[pygame.K_RIGHT]:
+                    self.vx += 0.4
+                    self.facing_left = False
+                else:
+                    self.vx *= 0.95
+                # 限速
+                self.vx = max(min(self.vx, actual_speed), -actual_speed)
+                # 冰面滑行提示（通过 Game 状态显示，这里只管逻辑）
 
         # (风力已移除，保留天气视觉效果)
 
@@ -1214,6 +1269,7 @@ class Game:
         # 提示系统
         self.tips = []                # 当前活跃的提示气泡
         self._tip_shown = set()       # 已触发过的提示 key（不重复显示）
+        self.prev_state = None         # 进入设置前的状态（用于返回）
 
         # 道具实体
         self.items = []
@@ -1662,18 +1718,15 @@ class Game:
 
         # 冰板状态
         ice_slip = False
-        ice_slip_dir = 0
         if self.ice_slip_active:
-            # 检查是否还在冰板上
             for p in self.planks:
                 if isinstance(p, PlankIce) and p.is_slipping:
                     ice_slip = True
-                    ice_slip_dir = p.slip_dir
                     break
             if not ice_slip:
                 self.ice_slip_active = False
 
-        self.cloud.update(keys, self.wind_force, ice_slip, ice_slip_dir)
+        self.cloud.update(keys, ice_slip)
 
         # 磁铁效果：吸附宠物
         if self.cloud.magnet_active:
@@ -1881,6 +1934,7 @@ class Game:
             self.audio.stop_bg()
             self.audio.play_sfx('game_over')
             self._save_highscore()
+            _write_result_dat(nAccountID, PLAYER_ID, WORLD_ID, self.score)
             # 成就检查
             self._unlock_achievement('初出茅庐')
             if self.score > 1000:
@@ -2165,11 +2219,12 @@ class Game:
 
     def _draw_settings_btn(self, mouse_pos):
         hover = self.btn_settings_play.collidepoint(mouse_pos)
-        bg = (80, 80, 80, 180) if hover else (50, 50, 50, 150)
+        bg = (100, 100, 100, 200) if hover else (60, 60, 60, 180)
         btn_surf = pygame.Surface((self.btn_settings_play.w, self.btn_settings_play.h), pygame.SRCALPHA)
         pygame.draw.rect(btn_surf, bg, btn_surf.get_rect(), border_radius=8)
         self.screen.blit(btn_surf, self.btn_settings_play.topleft)
-        icon_surf = self.font_icon.render('⚙', True, (200, 210, 230))
+        # 用 ASCII 字符代替 Unicode 齿轮（避免乱码）
+        icon_surf = self.font_icon.render('S', True, (200, 210, 230))
         self.screen.blit(icon_surf, (
             self.btn_settings_play.centerx - icon_surf.get_width() // 2,
             self.btn_settings_play.centery - icon_surf.get_height() // 2,
@@ -2309,10 +2364,7 @@ class Game:
             elif self.state == ST_PAUSED:
                 self.state = ST_PLAYING
             elif self.state == ST_SETTINGS:
-                if self.cloud is not None:
-                    self.state = ST_PAUSED
-                else:
-                    self.state = ST_MENU
+                self.state = self.prev_state or ST_PLAYING
             elif self.state == ST_CONFIRM:
                 self.state = ST_OVER
             elif self.state == ST_MENU:
@@ -2343,6 +2395,7 @@ class Game:
                 self.reset()
             elif self.btn_menu_settings.collidepoint(pos):
                 self.audio.play_sfx('click')
+                self.prev_state = self.state
                 self.state = ST_SETTINGS
 
         elif self.state == ST_SETTINGS:
@@ -2350,10 +2403,7 @@ class Game:
                 self.audio.play_sfx('click')
                 self._save_settings()
                 self._apply_settings_to_audio()
-                if hasattr(self, 'cloud') and self.cloud:
-                    self.state = ST_PAUSED
-                else:
-                    self.state = ST_MENU
+                self.state = self.prev_state or ST_PLAYING
 
             # 滑块点击
             for key, slider in self.settings_sliders.items():
@@ -2381,6 +2431,7 @@ class Game:
             if self.btn_resume.collidepoint(pos):
                 self.state = ST_PLAYING
             elif self.btn_pause_settings.collidepoint(pos):
+                self.prev_state = self.state
                 self.state = ST_SETTINGS
             elif self.btn_restart.collidepoint(pos):
                 self.reset()
